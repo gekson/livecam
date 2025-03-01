@@ -1,0 +1,183 @@
+<!doctype html>
+<html>
+    <head>
+        <title>Host - Livecam</title>
+    </head>
+    <body>
+        <h1>Host - Transmissão</h1>
+        <div id="videoContainer">
+            <video id="localVideo" autoplay playsinline muted></video>
+        </div>
+        <button onclick="startVideo()">Iniciar Vídeo</button>
+        <div id="chatContainer">
+            <h2>Chat</h2>
+            <div
+                id="chatMessages"
+                style="
+                    height: 200px;
+                    overflow-y: scroll;
+                    border: 1px solid #ccc;
+                "
+            ></div>
+            <input
+                id="chatInput"
+                type="text"
+                placeholder="Digite uma mensagem"
+            />
+            <button onclick="sendChat()">Enviar</button>
+        </div>
+        <script>
+            const ws = new WebSocket("ws://localhost:8090/ws");
+            const localVideo = document.getElementById("localVideo");
+            const chatMessages = document.getElementById("chatMessages");
+            const chatInput = document.getElementById("chatInput");
+            let localStream;
+            const peerConnections = {};
+            const mainRoomId = "room1";
+
+            ws.onopen = () => {
+                console.log("WebSocket aberto para host");
+                ws.send("JOIN:" + mainRoomId + ":host");
+            };
+
+            async function startVideo() {
+                try {
+                    localStream = await navigator.mediaDevices.getUserMedia({
+                        video: true,
+                        audio: false,
+                    });
+                    console.log("Stream da webcam obtido", localStream);
+                    localVideo.srcObject = localStream;
+                    for (const clientId in peerConnections) {
+                        const pc = peerConnections[clientId];
+                        pc.addTrack(localStream.getTracks()[0], localStream);
+                        console.log(
+                            "Adicionando tracks para cliente",
+                            clientId,
+                        );
+                        // Renegociar a conexão após adicionar o track
+                        const offer = await pc.createOffer();
+                        await pc.setLocalDescription(offer);
+                        console.log(
+                            "Enviando nova oferta para cliente",
+                            clientId,
+                            ":",
+                            offer,
+                        );
+                        ws.send(
+                            JSON.stringify({
+                                type: "offer",
+                                sdp: offer.sdp,
+                                clientId,
+                            }),
+                        );
+                    }
+                } catch (err) {
+                    console.error("Erro ao obter stream da webcam:", err);
+                }
+            }
+
+            ws.onmessage = async (event) => {
+                const data = JSON.parse(event.data);
+                console.log("Mensagem recebida no host:", data);
+
+                if (data.type === "chat") {
+                    chatMessages.innerHTML += `<p><strong>${data.sender || "Cliente"}:</strong> ${data.message}</p>`;
+                    chatMessages.scrollTop = chatMessages.scrollHeight;
+                    return;
+                }
+
+                if (data.type === "request-offer") {
+                    const clientId = data.clientId;
+                    console.log(
+                        "Recebida solicitação de oferta para cliente",
+                        clientId,
+                    );
+                    if (!peerConnections[clientId]) {
+                        peerConnections[clientId] = new RTCPeerConnection();
+                        peerConnections[clientId].onicecandidate = (event) => {
+                            if (event.candidate) {
+                                console.log(
+                                    "Candidato ICE enviado para cliente",
+                                    clientId,
+                                    ":",
+                                    event.candidate,
+                                );
+                                ws.send(
+                                    JSON.stringify({
+                                        type: "candidate",
+                                        candidate: event.candidate,
+                                        clientId,
+                                    }),
+                                );
+                            }
+                        };
+                        if (localStream) {
+                            peerConnections[clientId].addTrack(
+                                localStream.getTracks()[0],
+                                localStream,
+                            );
+                            console.log(
+                                "Adicionando tracks para cliente",
+                                clientId,
+                            );
+                        }
+                    }
+                    const pc = peerConnections[clientId];
+                    const offer = await pc.createOffer();
+                    await pc.setLocalDescription(offer);
+                    ws.send(
+                        JSON.stringify({
+                            type: "offer",
+                            sdp: offer.sdp,
+                            clientId,
+                        }),
+                    );
+                } else if (data.type === "answer") {
+                    const clientId = data.clientId;
+                    const pc = peerConnections[clientId];
+                    if (pc && pc.signalingState === "have-local-offer") {
+                        console.log(
+                            "Resposta recebida do cliente",
+                            clientId,
+                            ":",
+                            data,
+                        );
+                        await pc.setRemoteDescription(
+                            new RTCSessionDescription(data),
+                        );
+                    }
+                } else if (data.type === "candidate") {
+                    const clientId = data.clientId;
+                    const pc = peerConnections[clientId];
+                    if (pc) {
+                        console.log(
+                            "Candidato ICE recebido do cliente",
+                            clientId,
+                            ":",
+                            data.candidate,
+                        );
+                        await pc.addIceCandidate(
+                            new RTCIceCandidate(data.candidate),
+                        );
+                    }
+                }
+            };
+
+            function sendChat() {
+                const message = chatInput.value.trim();
+                if (message) {
+                    ws.send(
+                        JSON.stringify({
+                            type: "chat",
+                            sender: "Host",
+                            message,
+                            roomId: mainRoomId,
+                        }),
+                    );
+                    chatInput.value = "";
+                }
+            }
+        </script>
+    </body>
+</html>

@@ -1,0 +1,153 @@
+<!doctype html>
+<html>
+    <head>
+        <title>Cliente - Livecam</title>
+    </head>
+    <body>
+        <h1>Cliente - Visualização</h1>
+        <div id="videoContainer">
+            <video id="remoteVideo" autoplay playsinline></video>
+        </div>
+        <div>
+            <h2>Chat</h2>
+            <div
+                id="chatMessages"
+                style="
+                    height: 200px;
+                    overflow-y: scroll;
+                    border: 1px solid #ccc;
+                "
+            ></div>
+            <input
+                id="chatInput"
+                type="text"
+                placeholder="Digite uma mensagem"
+            />
+            <button onclick="sendChat()">Enviar</button>
+        </div>
+        <script>
+            const ws = new WebSocket("ws://localhost:8090/ws");
+            let video = document.getElementById("remoteVideo");
+            const chatMessages = document.getElementById("chatMessages");
+            const chatInput = document.getElementById("chatInput");
+            let peerConn = new RTCPeerConnection();
+            const clientId = Math.random().toString(36).substring(2);
+            const currentRoomId = "room1";
+            let isNegotiating = false;
+            let negotiationQueue = [];
+
+            ws.onopen = () => {
+                console.log("WebSocket aberto para cliente", clientId);
+                ws.send("JOIN:room1:client");
+                ws.send(JSON.stringify({ type: "request-offer", clientId }));
+            };
+
+            peerConn.ontrack = (event) => {
+                const stream = event.streams[0];
+                console.log("Track recebido:", event.track);
+                video.srcObject = stream;
+            };
+
+            peerConn.onicecandidate = (event) => {
+                if (event.candidate) {
+                    console.log("Candidato ICE enviado:", event.candidate);
+                    ws.send(
+                        JSON.stringify({
+                            type: "candidate",
+                            candidate: event.candidate,
+                            clientId,
+                        }),
+                    );
+                }
+            };
+
+            ws.onmessage = async (event) => {
+                const data = JSON.parse(event.data);
+                console.log(
+                    "Mensagem recebida no cliente",
+                    clientId,
+                    ":",
+                    data,
+                );
+
+                if (
+                    data.type === "chat" &&
+                    (data.roomId === currentRoomId || !data.roomId)
+                ) {
+                    const message = `<p><strong>${data.sender || "Host"}:</strong> ${data.message}</p>`;
+                    chatMessages.innerHTML += message;
+                    chatMessages.scrollTop = chatMessages.scrollHeight;
+                } else if (
+                    data.type === "offer" &&
+                    data.clientId === clientId
+                ) {
+                    if (isNegotiating) {
+                        console.log("Adicionando oferta à fila");
+                        negotiationQueue.push(data);
+                    } else {
+                        isNegotiating = true;
+                        try {
+                            await peerConn.setRemoteDescription(
+                                new RTCSessionDescription(data),
+                            );
+                            const answer = await peerConn.createAnswer();
+                            await peerConn.setLocalDescription(answer);
+                            ws.send(
+                                JSON.stringify({
+                                    type: "answer",
+                                    sdp: answer.sdp,
+                                    clientId,
+                                }),
+                            );
+                        } catch (err) {
+                            console.error("Erro ao processar oferta:", err);
+                        } finally {
+                            isNegotiating = false;
+                            if (negotiationQueue.length > 0) {
+                                const nextOffer = negotiationQueue.shift();
+                                ws.onmessage({
+                                    data: JSON.stringify(nextOffer),
+                                });
+                            }
+                        }
+                    }
+                } else if (
+                    data.type === "candidate" &&
+                    data.clientId === clientId
+                ) {
+                    await peerConn
+                        .addIceCandidate(new RTCIceCandidate(data.candidate))
+                        .catch((err) =>
+                            console.error(
+                                "Erro ao adicionar candidato ICE:",
+                                err,
+                            ),
+                        );
+                }
+            };
+
+            function sendChat() {
+                const message = chatInput.value.trim();
+                if (message) {
+                    console.log(
+                        "Enviando mensagem de chat para sala:",
+                        currentRoomId,
+                    );
+                    ws.send(
+                        JSON.stringify({
+                            type: "chat",
+                            sender: `Cliente-${clientId.slice(0, 4)}`,
+                            message,
+                            roomId: currentRoomId,
+                        }),
+                    );
+                    chatInput.value = "";
+                }
+            }
+
+            chatInput.addEventListener("keypress", (e) => {
+                if (e.key === "Enter") sendChat();
+            });
+        </script>
+    </body>
+</html>

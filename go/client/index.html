@@ -1,0 +1,24 @@
+<video id="video" autoplay></video>
+<input id="chatInput" type="text" />
+<button onclick="sendMessage()">Enviar</button>
+<div id="chat"></div>
+
+<script>
+    const ws = new WebSocket("ws://localhost:8080/ws");
+    const video = document.getElementById("video");
+
+    navigator.mediaDevices
+        .getUserMedia({ video: true })
+        .then((stream) => (video.srcObject = stream));
+
+    ws.onmessage = (event) => {
+        const chat = document.getElementById("chat");
+        chat.innerHTML += `<p>${event.data}</p>`;
+    };
+
+    function sendMessage() {
+        const input = document.getElementById("chatInput");
+        ws.send(input.value);
+        input.value = "";
+    }
+</script>
